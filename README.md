@@ -88,7 +88,7 @@ The study found that the **ARIMA(2,1,2)(1,1,1)** model outperformed the **ETS(A,
 
 ## 📂 Repository Structure
 ```plaintext
-/PastaSearchTimeSeries
+/PastaSearch_TimeSeriesAnalysis
     ├── README.md
     ├── PredictiveAnalytics_files/ # storing figures
         └── figure-gfm/ 
