@@ -1,0 +1,703 @@
+---
+title: "Predicting Pasta Passion: Time Series Analysis of Google Searches in Italy"
+author: "Elena Del Governatore"
+date: "2024-06-05"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r cars}
+# Load libraries
+library(AER)
+library(ggplot2)
+library(tsibble) 
+library(dplyr)
+library(fpp3)
+library(forecast)
+library(tidyverse,warn.conflicts=FALSE) 
+library(urca)
+
+library(fable)
+library(fabletools)
+library(feasts)
+library(strucchange)
+library(zoo)
+```
+
+```{r pressure, echo=FALSE}
+# Read data set
+df <- read.csv("/Users/elenadelgovernatore/Desktop/CBS/Second Semester/Predictive Analytics/Final_Project/Pasta.csv", header = TRUE)
+
+# Print first six rows of the dataset:
+head(df)
+```
+
+The analysis aims at forecasting future interest in pasta, by analzying frequency of searches for "pasta" by Google users in Italy.
+
+# Exploratory Data Analysis
+
+```{r}
+
+# Convert Month to yearmonth format and create tsibble
+df_ts <- df %>%
+  mutate(Month = yearmonth(Month)) %>%
+  as_tsibble(index = Month) %>%
+  fill_gaps()
+
+# Check for missing months and remove any remaining NAs
+df_ts <- df_ts %>%
+  fill_gaps() %>%
+  filter(!is.na(Pasta))
+
+# Verify the tsibble structure and content
+print(df_ts)
+
+```
+
+```{r}
+
+# Plot 
+plot.1 <- df_ts %>%
+  filter(!is.na(Pasta)) %>% # Ignore NAs 
+  autoplot(Pasta) + 
+  labs(title = "Pasta Search Requests on Google", x = "Date", y = "Search Requests of Pasta") +
+  theme_minimal()
+
+print(plot.1) 
+
+```
+
+## ACF and PACF
+
+```{r}
+#Remove null values in the gdp growth variable 
+Pasta_growth <- na.omit(df_ts$Pasta)
+
+# Calculate the autocorrelation of the "gap" variable
+acf <- acf(Pasta_growth, plot = FALSE)
+pacf <- pacf(Pasta_growth, plot = FALSE)
+
+# Plot the autocorrelation
+plot(acf, 
+     main = "Pasta ACF", 
+     xlab = "Lag", 
+     ylab = "ACF") 
+
+
+plot(pacf, 
+     main = "Pasta PACF", 
+     xlab = "Lag", 
+     ylab = "ACF") 
+
+
+
+```
+
+ACF shows clear indications of non stationarity in the data , indeed: - all the lags are significant: autocorrelation that persists over many lags. it is probably a unit root. - the decay pattern suggests a drift could be present in the time series.
+
+PACF shows one very significant lag (very close to 1) and nothing apart from 13 (not very significant)
+
+## Decomposition
+
+```{r}
+
+# Perform STL decomposition for monthly data
+stl_decomp <- df_ts %>%
+  model(STL(Pasta ~ season(window = "periodic"))) 
+
+# Extract components
+components <- stl_decomp %>%
+  components()
+
+# Plot components
+autoplot(components) + ggtitle("Decomposition of the Time Series Using STL ")
+
+
+```
+
+The decomposition shows four graphs: original series, trend, seasonal component, reminder/ irregular component
+
+There is a clear upward trend from 2004 to around 2020, indicating a consistent increase in interest or activity related to pasta. After 2020, the trend flattens and slightly declines. In 2020 there is a high peak in searches which aligns with the COVID-19 pandemic's impact on people's lifestyle.
+
+The plot exhibits regular, periodic fluctuations, which are characteristic of seasonality. In particular, it indicates a strong seasonal pattern repeating every year. Also, the significant amplitude indicates a strong seasonal influence.
+
+The residuals appear to be relatively small and centered around zero, with the exception of a significant spike around 2020, that suggests an anomaly. This is possible due to the COVID-19 pandemic, where many people might have been searching for pasta recipes or related topics as they stayed home.
+
+```{r}
+
+# th edecomposition suggests seasonality 
+# check: closer look at seasonality 
+ seasoon <- df_ts %>% 
+   select(Pasta) %>% 
+   as.ts %>% 
+   ggseasonplot() + 
+   ggtitle("Seasonality in Pasta Searches")+ 
+   theme_minimal() 
+ 
+ 
+ df_ts |>
+  gg_subseries(Pasta)
+```
+
+The seasonal plots confirms the presence of seasonality in the search interest for "pasta." There are clear, consistent patterns repeating each year across the months.
+
+There is increasing search interest around certain months, particularly during the winter months, starting from the end of October and picking up again towards the end of the year, especially in December. Then another increase in interest around April.
+
+Afterwards, the interest tends to drop after April, especially noticeable in the summer months, namely June, July and August, where it reached the lowest levels.
+
+```{r}
+# Kruskal-Wallis Test
+kruskal.test(Pasta ~ month(Month), data = df_ts)
+```
+
+A further test, namely the Kruskal-Wallis Test is carried out. The significant p-value of 0.2987 indicates significant differences in search interest between different months, supporting the presence of seasonality.
+
+## Box-Cox Transformation
+
+```{r}
+lambda <- df_ts |>
+  features(Pasta, features = guerrero) |>
+  pull(lambda_guerrero)
+
+lambda
+
+```
+
+**Lambda Value Range**:
+
+-   **λ = 1**: No transformation (data is already normally distributed).
+
+-   **λ = 0**: Log transformation.
+
+-   **λ between 0 and 1**: Transformation applied is a power transformation, which can help stabilize variance.
+
+**Negative Lambda**: Indicates that the data likely benefits from an inverse power transformation. This suggests that the variance of the data changes with the level of the data and that applying this transformation can help stabilize the variance.
+
+Based on the lambda obtained, data would benefit from a transformation to stabilize the variance. The specific transformation suggested by Guerrero's method is a Box-Cox transformation with a lambda of -0.4021361.
+
+Note: it was already detectable from the ACF that it needed a trasnformation
+
+```{r}
+# Apply Box-Cox transformation
+pasta_transformed <- BoxCox(df_ts$Pasta, lambda = lambda)
+
+# Add the transformed data to your tsibble
+df_ts <- df_ts %>%
+  mutate(Pasta_transformed = pasta_transformed)
+
+```
+
+```{r}
+# Plot the transformed data to inspect
+autoplot(df_ts, Pasta_transformed) +
+  labs(title = "Box-Cox Transformed Pasta Data",
+       y = "Transformed Search Interest",
+       x = "Month")+
+  theme_minimal()
+
+
+```
+
+```{r}
+
+# Calculate the autocorrelation of the "gap" variable
+autocorrelation2 <- acf(df_ts$Pasta_transformed, plot = FALSE)
+
+# Plot the autocorrelation
+plot(autocorrelation2, 
+     main = "ACF of Pasta", 
+     xlab = "Lag", 
+     ylab = "ACF") 
+```
+
+Even after transformation, high autocorrelation persist. Therefore the log transformation was not sufficient significantly reduce variance.
+
+# Data Preparation: Stationarity
+
+## Unit Root Tests: ADF and KPSS
+
+ADF and KPSS tests are used to test for stationarity in the data.
+
+```{r}
+pasta_ts <- df_ts %>% select(Pasta) %>% as.ts()
+
+```
+
++-----------------+-----------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Unit Root Tests | Null Hypothesis                                                                                     | Decision Rule                                                                                                                                                                  |
++=================+=====================================================================================================+================================================================================================================================================================================+
+| KPSS Test       | -   **Null Hypothesis (H0)**: The series is stationary (no unit root).                              | -   If the test statistic is greater than the critical value, we reject the null hypothesis.                                                                                   |
+|                 |                                                                                                     |                                                                                                                                                                                |
+|                 | -   **Alternative Hypothesis (H1)**: The series is not stationary (has a unit root).                | -   If the test statistic is less than the critical value, we fail to reject the null hypothesis.                                                                              |
++-----------------+-----------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ADF Test        | -   **Null Hypothesis (H0)**: The series has a unit root (i.e., it is non-stationary).              | -   **If the test statistic is less than the critical value** (more negative), we reject the null hypothesis (H0). This indicates that the series is stationary.               |
+|                 |                                                                                                     |                                                                                                                                                                                |
+|                 | -   **Alternative Hypothesis (H1)**: The series does not have a unit root (i.e., it is stationary). | -   **If the test statistic is greater than the critical value** (less negative), we fail to reject the null hypothesis (H0). This indicates that the series is non-stationary |
++-----------------+-----------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+### With no drift and trend
+
+```{r}
+
+# KPSS including nothing
+
+summary(ur.kpss(pasta_ts, type = "mu"))
+ 
+```
+
+```{r}
+# ADF test with nothing
+adf_none <- ur.df(pasta_ts, type = "none", lag= 24, selectlags = "AIC")
+summary(adf_none)
+
+# Note: 24 lags used because it is a monthly time series 
+
+```
+
+Both tests suggested the presence of a unit root, indicating non-stationary data, at all critical values.
+
+### Including a trend and drift terms
+
+```{r}
+# KPSS including a trend
+
+summary(ur.kpss(pasta_ts, type = "tau"))
+
+
+```
+
+```{r}
+#with drift
+adf_drift <- ur.df(pasta_ts, type = "drift", lag= 24, selectlags = "AIC")
+# with trend
+adf_trend <- ur.df(pasta_ts, type = "trend", lag= 24, selectlags = "AIC")
+
+summary(adf_drift)
+summary(adf_trend)
+```
+
+For the KPSS test, the "tau" parameter was used, and the null hypothesis was rejected at all significance levels, implying non-stationarity. For the ADF test with the "trend" parameter, the "tau3" results could not reject the null hypothesis at all critical values, indicating a unit root. With "phi2" and "phi3," the null hypotheses (indicating a unit root without a trend and a unit root without a drift) were rejected, suggesting a random walk with both a trend and drift. The ADF test with the "drift" parameter showed that the "tau2" results could not reject the null hypothesis at all critical values, indicating a unit root. The "phi1" results rejected the null hypothesis of a unit root without drift, confirming the presence of a drift.
+
+## Differencing Data
+
+In the original series, results showed a significant intercept both in the drift model and in the trend model. This suggests there might have been a drift component as well as a trend component in the original series that resulted in non-stationarity. This will be addressed by differencing data.
+
+```{r}
+# how many differencing are needed 
+ndiffs(pasta_ts)
+
+# whether seasonal differencing is needed
+nsdiffs(pasta_ts)
+```
+
+```{r}
+# first difference 
+df_ts %>%
+  mutate(d.Pasta = difference(Pasta)) -> df_ts
+
+d_pasta = df_ts%>% 
+  select(d.Pasta) %>% 
+  filter(!is.na(d.Pasta)) %>% 
+  as.ts() 
+
+# unit root tests 
+summary(ur.kpss(d_pasta, type = 'mu'))
+
+adf_none_d1 <- ur.df(d_pasta, type = "none", lag= 24, selectlags = "AIC")
+summary(adf_none_d1)
+
+```
+
+Data is stationary .
+
+According to both KPSS and ADF, the test statistic is less than all critical values. Therefore, the KPSS test fails to reject the null hypothesis of stationarity, and the ADF test rejects the null hypothesis of non-stationarity. This strong agreement between the two tests indicates that the series has achieved stationarity after differencing once.
+
+## Structural Break Test
+
+Previous findings suggested a significant change in pasta-search in March 2020, that is during the beginning of the COVID-19 pandemic. This may result in a strctural break.
+
+Therefore, structural breaks are tested using the QLR test.
+
+```{r}
+# Convert the differenced series to a zoo object
+d_pasta_zoo <- as.zoo(d_pasta)
+
+
+#  lagged time series  with appropriate lags
+lagged_pasta_ts <- cbind(
+  Lag0 = d_pasta,
+  Lag1 = stats::lag(d_pasta, -1),
+  Lag2 = stats::lag(d_pasta, -2)
+)
+
+# Convert the lagged series to a data frame
+lagged_pasta_df <- as.data.frame(lagged_pasta_ts)
+
+# Ensure there are no NA values in the lagged data frame
+lagged_pasta_df <- na.omit(lagged_pasta_df)
+
+# Perform the structural break test using Fstats
+qlr <- Fstats(Lag0 ~ Lag1 + Lag2, data = lagged_pasta_df, from = 0.1) # 10% confidence level
+
+# SupF test
+test <- sctest(qlr, type = "supF")
+print(test)
+# the test allow you to know whether or not there is astrctural break, by comparing p value with confidence interval 
+
+breakpoints <- breakpoints(qlr, alpha = 0.01)
+print(breakpoints)
+# breakpoints gives the number of the observation at which the structural break might happen
+
+# Plot the F statistics
+ plot(qlr, alpha = 0.1, main = "F Statistics: Structural Break Analysis")
+lines(breakpoints)
+```
+
+**SupF Test**
+
+Decision Rule for SupF TestDecision Rule for SupF Test
+
+-   Null Hypothesis (H0): No structural break.
+
+-   Alternative Hypothesis (H1): There is a structural break.
+
+-   If the p-value is less than the significance level (e.g., 0.05), we reject the null hypothesis, indicating a structural break.
+
+-   If the p-value is greater than the significance level, we fail to reject the null hypothesis, indicating no structural break.
+
+The relative supF test rejected the null hypothesis of no structural break, with a p-value lower than all the critical levels.
+
+**F-Statistics Plot**
+
+The plot of F-statistics confirms the previous findings. There is a structural break
+
+```{r}
+
+# get data at breakpoint
+df_ts[195,]
+```
+
+Observation number 195 corresponds to March 2020, that is the first month of COVID-19 pandemic.
+
+## Shortening Time Series
+
+Data is kept from the 2019 onwards.
+
+```{r}
+df_ts_shortened <- df_ts %>%
+   filter_index("2018 M1" ~ .) 
+
+d_pasta_shortened = df_ts_shortened%>% 
+  select(d.Pasta) %>% 
+  filter(!is.na(d.Pasta)) %>% 
+  as.ts() 
+
+summary(ur.kpss(d_pasta_shortened, type = 'mu'))
+summary(ur.df(d_pasta_shortened, type = 'none', lag = 24, selectlags = 'AIC'))
+
+```
+
+Results confirms data is stationary.
+
+# The Differentiated Series
+
+```{r}
+# plotting stationary data 
+df_ts_shortened %>%
+  filter(!is.na(d.Pasta)) %>% # Ignore NAs 
+  autoplot(d.Pasta) + 
+  labs(title = "The Differentiated and Shortened Time Series ", x = "Date", y = "Search Requests of Pasta") +
+  theme_minimal()
+
+
+```
+
+-   the pattern of this data seems to fluctuates around 0.
+
+-   a clear pattern for seasonality does not emerge from the graph.
+
+## ACF and PACF
+
+```{r}
+
+plot.3 <- ggAcf(df_ts_shortened %>% select(d.Pasta)) + ggtitle("ACF") +   theme_minimal()
+print(plot.3)
+plot.4 <- ggPacf(df_ts_shortened %>% select(d.Pasta)) + ggtitle("PACF") +   theme_minimal()
+print(plot.4)
+
+
+```
+
+A significant seasonal spike at lag 12 in the ACF and PACF indicated a yearly seasonal pattern. This was reinforced by the significant spike at the 24th lag in the ACF, indicating one seasonal MA component (Q = 1). The exponentially decaying ACF in the seasonal lags also suggests a seasonal AR component of order 1 (P = 1). The presence of an autoregressive (AR) component, including AR terms up to lag 2 (p = 2), is supported by the truncated PACF after the second lag. The ACF also shows significant spikes at lag 2, suggesting the inclusion of a non-seasonal moving average (MA) component up to lag 2 (q = 2). Based on these observations, an ARIMA (2,1,2)(1,1,1)[12] is chosen.
+
+# Splitting: Train and Test Sets
+
+The dataset is split into training and testing sets. The training set is used to fit/estimate the models, while the test set is used to test the model and make forecasts.
+
+Precisely, the last observed year is kept for the test set, while the rest of observations is used for training. The results is two dataset comprising, respectively, 60 months i.e. 5 years and 18 months i.e. 1 year and a half. The dataset split is approximately 70% for the training set and 30% for the test set.
+
+```{r}
+# with shortened series 
+train_end <- yearmonth("2022-12")
+
+train_set_shortened <- df_ts_shortened %>% 
+  filter(Month <= train_end)
+test_set_shortened <- df_ts_shortened %>% 
+  filter(Month > train_end)
+
+# Verify
+train_set_shortened
+test_set_shortened
+
+# count the number of observations in each subset
+print("Number of observations in the training set:")
+print(nrow(train_set_shortened))
+
+print("Number of observations in the testing set:")
+print(nrow(test_set_shortened))
+```
+
+# Model Choose and Evaluation
+
+Models: ARIMA and ETS
+
+Evaluation on the training set according two different criteris.
+
+1.  AIC, AICs and BIC:
+2.  Residuals Diagnostics
+3.   Ljung-Box Test
+
+-   Null Hypothesis (H0): The residuals are independently distributed (no autocorrelation).
+
+-   Alternative Hypothesis (H1): The residuals are not independently distributed (there is autocorrelation).
+
+-   p-value \> 0.05: Fail to reject the null hypothesis. This suggests that there is no significant autocorrelation in the residuals
+
+-   p-value ≤ 0.05: Reject the null hypothesis. This suggests that there is significant autocorrelation in the residuals.
+
+```{r}
+train_set_shortened <- train_set_shortened %>% filter(!is.na(d.Pasta))
+
+```
+
+## ARIMA Models
+
+Three ARIMA modes are estimated on the training set, namely:
+
+1.  Automated ARIMA (default paramaters)
+2.  Automated ARIMA with stepwise = FALSE, approx = FALSE
+3.  Guessed ARIMA(2,1,2)(1,1,1)[12]
+
+```{r}
+
+# SET THE MODELS
+models_ARIMA <- train_set_shortened %>%
+  model(
+    arima_default = ARIMA(d.Pasta),
+    arima_adv = ARIMA(d.Pasta, stepwise = FALSE, approx = FALSE),
+    arima_guessed = ARIMA(d.Pasta ~ pdq(2,1,2) + PDQ(1,1,1, period = 12))
+  )
+
+# AIC, BIC, AICc
+models_ARIMA %>% select(arima_default) %>% report()
+models_ARIMA %>% select(arima_adv) %>% report()
+models_ARIMA %>% select(arima_guessed) %>% report()
+
+
+```
+
+```{r}
+# Residuals Diagnostics 
+models_ARIMA %>% 
+  select(arima_default) %>% 
+  gg_tsresiduals(type = "innovation") +
+  ggtitle ("Residuals from Automated ARIMA(0,0,0)(1,0,0)[12] ")
+
+models_ARIMA %>% 
+  select(arima_adv) %>% 
+  gg_tsresiduals(type = "innovation") +
+  ggtitle ("Residuals from Automated ARIMA(0,0,3)(1,0,0)[12]")
+
+models_ARIMA %>% 
+  select(arima_guessed) %>% 
+  gg_tsresiduals(type = "innovation")+ 
+  ggtitle ("Residuals from Guessed ARIMA(2,1,2)(1,1,1)[12]")
+
+
+# Ljung-Box Test 
+models_ARIMA %>% 
+  select(arima_default) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+
+models_ARIMA %>% 
+  select(arima_adv) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+
+models_ARIMA %>% 
+  select(arima_guessed) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+```
+
+## ETS Models
+
+Four ETS models were tested
+
+1.  ETS(A,N,A)
+2.   ETS(A,A,A)
+3.  ETS(M,A,A)
+4.  ETS(M,N,A)
+
+```{r}
+
+# Filter data up to a certain date for model estimation
+models_ETS <- train_set_shortened %>%
+  model(
+    ETS_default = ETS(d.Pasta),
+    ETS_ad = ETS(d.Pasta ~ error("A") + trend("A") + season("A")),
+    ETS_mu = ETS(d.Pasta ~ error("M") + trend("A") + season("A")), 
+    ETS_mn = ETS(d.Pasta ~ error("M") + trend("N") + season("A"))
+  )
+
+# AIC, BIC, AICc
+models_ETS %>% select(ETS_default) %>% report()
+models_ETS %>% select(ETS_ad) %>% report()
+models_ETS %>% select(ETS_mu) %>% report()
+models_ETS %>% select(ETS_mn) %>% report()
+
+
+
+```
+
+```{r}
+# Residuals Diagnostics 
+models_ETS %>% 
+  select(ETS_default) %>% 
+  gg_tsresiduals(type = "innovation") +
+  ggtitle ("Residuals from Automated ETS(A,N,A) ")
+
+models_ETS %>% 
+  select(ETS_ad) %>% 
+  gg_tsresiduals(type = "innovation") +
+  ggtitle ("Residuals from ETS(A,A,A)")
+
+ models_ETS %>% 
+  select(ETS_mu) %>% 
+  gg_tsresiduals(type = "innovation")+ 
+  ggtitle ("Residuals from ETS(M,A,A)")
+
+
+models_ETS %>% 
+  select(ETS_mn) %>% 
+  gg_tsresiduals(type = "innovation")+ 
+  ggtitle ("Residuals from ETS(M,N,A)")
+
+# Ljung-Box Test 
+models_ETS %>% 
+  select(ETS_default) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+
+models_ETS %>% 
+  select(ETS_ad) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+
+models_ETS %>% 
+  select(ETS_mu) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+
+models_ETS %>% 
+  select(ETS_mn) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 6)
+```
+
+# Model Use and Forecasts
+
+The forecasts are computed for each model and then the models' accuracies are compared: The forecasts are evaluated according to mainly two measures, that is RMSE and MASE.
+
+```{r}
+f_pasta <- test_set_shortened %>% select(d.Pasta)
+d_pasta <- df_ts_shortened%>% 
+  select(d.Pasta)
+```
+
+## ARIMA Models
+
+```{r}
+# produce forecast
+forc_ARIMA  <- models_ARIMA %>% 
+  forecast(h = 36)
+
+#evaluate forcasts 
+accuracy(forc_ARIMA, d_pasta) 
+
+
+```
+
+```{r}
+# plot forecasts 
+forc_ARIMA %>%
+  filter(.model == "arima_default") %>%
+  autoplot(d_pasta) +
+  labs(title = "ARIMA(0,0,0)(1,0,0)[12] Forecasts")
+
+forc_ARIMA %>%
+  filter(.model == "arima_adv") %>%
+  autoplot(d_pasta) +
+  labs(title = "ARIMA(0,0,3)(1,0,0)[12] Forecasts")
+
+forc_ARIMA %>%
+  filter(.model == "arima_guessed") %>%
+  autoplot(d_pasta) +
+  labs(title = "ARIMA(2,1,2)(1,1,1)[12] Forecasts") +
+  theme_minimal()
+
+```
+
+## ETS Models
+
+```{r}
+
+# produce forecast
+forc_ETS  <- models_ETS %>% 
+  forecast(h=36)
+
+#evaluate forcasts 
+accuracy(forc_ETS, d_pasta) 
+
+
+```
+
+```{r}
+# plot forecasts 
+forc_ETS %>%
+  filter(.model == "ETS_default") %>%
+  autoplot(d_pasta) +
+  labs(title = "ETS(A,N,A) Forecasts")+
+  theme_minimal()
+
+forc_ETS %>%
+  filter(.model == "ETS_ad") %>%
+  autoplot(d_pasta) +
+  labs(title = "ETS(A,A,A) Forecasts")
+
+forc_ETS %>%
+  filter(.model == "ETS_mu") %>%
+  autoplot(d_pasta) +
+  labs(title = "ETS(M,A,A) Forecasts")
+
+forc_ETS %>%
+  filter(.model == "ETS_mu") %>%
+  autoplot(d_pasta) +
+  labs(title = "ETS(M,N,A) Forecasts")
+
+
+```
